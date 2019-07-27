@@ -57,24 +57,47 @@ export default class GoService {
     return client.handshake.query.profile
   }
 
+  /**
+   * Returns a list of pipelines that are currently disabled for all active client connections
+   * so that we don't poll for changes unnecessarily.
+   * Defaults to the settings of the default profile if no clients are connected
+   *
+   * @param {Array<String>}          pipeline names
+   */
+  pipelinesDisabledInActiveProfiles() {
+    const activeProfiles = this.activeProfiles();
+    // Use default profile for decision making if no active profiles
+    const profilesToUse = activeProfiles.length !== 0 ? activeProfiles : [null]
+
+    const activeSettings = profilesToUse.map((profile) => this.currentSettings(profile))
+    return Promise.all(activeSettings).then((settings) => {
+      let disabledPipelines = settings.map((setting) => setting.disabledPipelines)
+      return _.intersection(...disabledPipelines)
+    })
+  }
+
   pollGoServer() {
     // Function that refreshes all pipelines
     const refreshPipelines = (pipelineNames) => {
       let currentPipelines = [];
-      pipelineNames.forEach((name) => {
-        this.buildService.getPipelineHistory(name).then((pipeline) => {
-          // Add pause information
-          if (this.pipelinesPauseInfo[name] && pipeline) {
-            pipeline.pauseinfo = this.pipelinesPauseInfo[name];
-          }
-          currentPipelines.push(pipeline);
-          if (currentPipelines.length === pipelineNames.length) {
-            this.pipelines = currentPipelines;
-            // Update tests if needed
-            this.updateTestResults(currentPipelines);
-            Logger.debug(`Emitting ${currentPipelines.length} pipelines to ${this.clients.length} clients`);
-            this.notifyAllClients('pipelines:updated', currentPipelines);
-          }
+      this.pipelinesDisabledInActiveProfiles().then((pipelinesToIgnore) => {
+        const pipelinesToFetch = pipelineNames.filter(p => pipelinesToIgnore.indexOf(p) < 0);
+        Logger.debug(`Refreshing pipeline status. Fetching: ${JSON.stringify(pipelinesToFetch)}; Ignoring: ${JSON.stringify(pipelinesToIgnore)}`)
+        pipelinesToFetch.forEach((name) => {
+          this.buildService.getPipelineHistory(name).then((pipeline) => {
+            // Add pause information
+            if (this.pipelinesPauseInfo[name] && pipeline) {
+              pipeline.pauseinfo = this.pipelinesPauseInfo[name];
+            }
+            currentPipelines.push(pipeline);
+            if (currentPipelines.length === pipelineNames.length) {
+              this.pipelines = currentPipelines;
+              // Update tests if needed
+              this.updateTestResults(currentPipelines);
+              Logger.debug(`Emitting ${currentPipelines.length} pipelines to ${this.clients.length} clients`);
+              this.notifyAllClients('pipelines:updated', currentPipelines);
+            }
+          });
         });
       });
     };
@@ -338,6 +361,15 @@ export default class GoService {
     clientsWithProfile.forEach((client) => {
       client.emit(event, data);
     });
+  }
+
+  /**
+   * Returns a list of profiles-names that are currently active
+   *
+   * @param {Array<String>}          profile names
+   */
+  activeProfiles() {
+    return _.uniq(this.clients.map(this.profileForClient))
   }
 
   // Get latest test results from db and notify all clients
